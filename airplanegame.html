@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html">
+    <title>airplanegame - HSP3Dish</title>
+    <style>
+      body {
+        font-family: arial;
+        margin: 0;
+        padding: 0;
+      }
+
+      .emscripten { padding-right: 0; margin-left: auto; margin-right: auto; display: block; }
+      div.emscripten { text-align: center; }      
+      /*div.emscripten_border { border: 1px solid black; }*/ /* ezlocal-dish-js */
+      /* the canvas *must not* have any border or padding, or mouse coords will be wrong */
+      canvas.emscripten { border: 0px none; }
+
+      #emscripten_logo {
+        display: inline-block;
+        margin: 0;
+      }
+
+      .spinner {
+        height: 30px;
+        width: 30px;
+        margin: 0;
+        margin-top: 20px;
+        margin-left: 20px;
+        display: inline-block;
+        vertical-align: top;
+
+        -webkit-animation: rotation .8s linear infinite;
+        -moz-animation: rotation .8s linear infinite;
+        -o-animation: rotation .8s linear infinite;
+        animation: rotation 0.8s linear infinite;
+
+        border-left: 5px solid rgb(235, 235, 235);
+        border-right: 5px solid rgb(235, 235, 235);
+        border-bottom: 5px solid rgb(235, 235, 235);
+        border-top: 5px solid rgb(120, 120, 120);
+        
+        border-radius: 100%;
+        background-color: rgb(189, 215, 46);
+      }
+
+      @-webkit-keyframes rotation {
+        from {-webkit-transform: rotate(0deg);}
+        to {-webkit-transform: rotate(360deg);}
+      }
+      @-moz-keyframes rotation {
+        from {-moz-transform: rotate(0deg);}
+        to {-moz-transform: rotate(360deg);}
+      }
+      @-o-keyframes rotation {
+        from {-o-transform: rotate(0deg);}
+        to {-o-transform: rotate(360deg);}
+      }
+      @keyframes rotation {
+        from {transform: rotate(0deg);}
+        to {transform: rotate(360deg);}
+      }
+
+      #status {
+        display: inline-block;
+        vertical-align: top;
+        margin-top: 30px;
+        margin-left: 20px;
+        font-weight: bold;
+        color: rgb(120, 120, 120);
+      }
+
+      #progress {
+        height: 20px;
+        width: 30px;
+      }
+
+      #controls {
+        display: inline-block;
+        float: right;
+        vertical-align: top;
+        margin-top: 30px;
+        margin-right: 20px;
+      }
+
+      #output {
+        width: 98%; /* ezlocal-dish-js */
+        height: 200px;
+        margin: 0 auto;
+        margin-top: 10px;
+        display: block;
+        background-color: black;
+        color: white;
+        font-family: 'Lucida Console', Monaco, monospace;
+        outline: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="spinner" id='spinner'></div>
+    <div class="emscripten" id="status">Downloading...</div>
+
+    <div class="emscripten">
+      <progress value="0" max="100" id="progress" hidden></progress>
+    </div>
+
+    
+    <div class="emscripten_border">
+      <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+    </div>
+    <textarea id="output" rows="8" style="display:none;"></textarea> <!-- ezlocal-dish-js -->
+    <button style="width: 240px; height: 50px; display:none;" id="btn_flg">センサーを許可する</button> <!-- ezlocal-dish-js -->
+
+    <script type='text/javascript'>
+      var statusElement = document.getElementById('status');
+      var progressElement = document.getElementById('progress');
+      var spinnerElement = document.getElementById('spinner');
+      var sensor_button = 0;
+
+      var Module = {
+        INITIAL_MEMORY: 209715200,
+        preRun: [],
+        postRun: [],
+        print: (function() {
+          var element = document.getElementById('output');
+          if (element) element.value = ''; // clear browser cache
+          return function(text) {
+            text = Array.prototype.slice.call(arguments).join(' ');
+            // These replacements are necessary if you render to raw HTML
+            //text = text.replace(/&/g, "&amp;");
+            //text = text.replace(/</g, "&lt;");
+            //text = text.replace(/>/g, "&gt;");
+            //text = text.replace('\n', '<br>', 'g');
+            console.log(text);
+            if (element) {
+              element.value += text + "\n";
+              element.scrollTop = element.scrollHeight; // focus on bottom
+              if (text.includes('#Error')) element.style.display = "";  // ezlocal-dish-js
+            }
+          };
+        })(),
+        printErr: function(text) {
+          text = Array.prototype.slice.call(arguments).join(' ');
+          if (0) { // XXX disabled for safety typeof dump == 'function') {
+            dump(text + '\n'); // fast, straight to the real console
+          } else {
+            console.error(text);
+          }
+        },
+        canvas: document.getElementById('canvas'),
+        setStatus: function(text) {
+          if (!Module.setStatus.last) Module.setStatus.last = { time: Date.now(), text: '' };
+          if (text === Module.setStatus.text) return;
+          var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+          var now = Date.now();
+          if (m && now - Date.now() < 30) return; // if this is a progress update, skip it if too soon
+          if (m) {
+            text = m[1];
+            progressElement.value = parseInt(m[2])*100;
+            progressElement.max = parseInt(m[4])*100;
+            progressElement.hidden = false;
+            spinnerElement.hidden = false;
+          } else {
+            progressElement.value = null;
+            progressElement.max = null;
+            progressElement.hidden = true;
+            if (!text) spinnerElement.style.display = 'none';
+            if (!text) statusElement.style.display = 'none';  // ezlocal-dish-js
+          }
+          statusElement.innerHTML = text;
+        },
+        totalDependencies: 0,
+        monitorRunDependencies: function(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          Module.setStatus(left ? 'Preparing... (' + (this.totalDependencies-left) + '/' + this.totalDependencies + ')' : 'All downloads complete.');
+        },
+        arguments: ["airplanegame.ax"]
+      };
+      Module.setStatus('Downloading...');
+
+/* block.js */
+
+var Module;
+if (typeof Module === 'undefined') Module = eval('(function() { try { return Module || {} } catch(e) { return {} } })()');
+if (!Module.expectedDataFileDownloads) {
+  Module.expectedDataFileDownloads = 0;
+  Module.finishedDataFileDownloads = 0;
+}
+Module.expectedDataFileDownloads++;
+(function() {
+
+    var PACKAGE_PATH;
+    if (typeof window === 'object') {
+      PACKAGE_PATH = window['encodeURIComponent'](window.location.pathname.toString().substring(0, window.location.pathname.toString().lastIndexOf('/')) + '/');
+    } else {
+      // worker
+      PACKAGE_PATH = encodeURIComponent(location.pathname.toString().substring(0, location.pathname.toString().lastIndexOf('/')) + '/');
+    }
+    var PACKAGE_NAME = 'airplanegame.data';
+    var REMOTE_PACKAGE_NAME = (Module['filePackagePrefixURL'] || '') + 'airplanegame.data';
+    var REMOTE_PACKAGE_SIZE = 4292766;
+    var PACKAGE_UUID = '51f84d03-0c74-4552-ac13-924e79e76977';
+  
+    function fetchRemotePackage(packageName, packageSize, callback, errback) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', packageName, true);
+      xhr.responseType = 'arraybuffer';
+      xhr.onprogress = function(event) {
+        var url = packageName;
+        var size = packageSize;
+        if (event.total) size = event.total;
+        if (event.loaded) {
+          if (!xhr.addedTotal) {
+            xhr.addedTotal = true;
+            if (!Module.dataFileDownloads) Module.dataFileDownloads = {};
+            Module.dataFileDownloads[url] = {
+              loaded: event.loaded,
+              total: size
+            };
+          } else {
+            Module.dataFileDownloads[url].loaded = event.loaded;
+          }
+          var total = 0;
+          var loaded = 0;
+          var num = 0;
+          for (var download in Module.dataFileDownloads) {
+          var data = Module.dataFileDownloads[download];
+            total += data.total;
+            loaded += data.loaded;
+            num++;
+          }
+          total = Math.ceil(total * Module.expectedDataFileDownloads/num);
+          if (Module['setStatus']) Module['setStatus']('Downloading data... (' + loaded + '/' + total + ')');
+        } else if (!Module.dataFileDownloads) {
+          if (Module['setStatus']) Module['setStatus']('Downloading data...');
+        }
+      };
+      xhr.onload = function(event) {
+        var packageData = xhr.response;
+        callback(packageData);
+      };
+      xhr.send(null);
+    };
+
+    function handleError(error) {
+      console.error('package error:', error);
+    };
+  
+      var fetched = null, fetchedCallback = null;
+      fetchRemotePackage(REMOTE_PACKAGE_NAME, REMOTE_PACKAGE_SIZE, function(data) {
+        if (fetchedCallback) {
+          fetchedCallback(data);
+          fetchedCallback = null;
+        } else {
+          fetched = data;
+        }
+      }, handleError);
+    
+  function runWithFS() {
+
+function assert(check, msg) {
+  if (!check) throw msg + new Error().stack;
+}
+
+Module['FS_createPath']('/', 'res', true, true);
+Module['FS_createPath']('/res', 'shaders', true, true);
+
+
+    function DataRequest(start, end, crunched, audio) {
+      this.start = start;
+      this.end = end;
+      this.crunched = crunched;
+      this.audio = audio;
+    }
+    DataRequest.prototype = {
+      requests: {},
+      open: function(mode, name) {
+        this.name = name;
+        this.requests[name] = this;
+        Module['addRunDependency']('fp ' + this.name);
+      },
+      send: function() {},
+      onload: function() {
+        var byteArray = this.byteArray.subarray(this.start, this.end);
+
+          this.finish(byteArray);
+
+      },
+      finish: function(byteArray) {
+        var that = this;
+        Module['FS_createPreloadedFile'](this.name, null, byteArray, true, true, function() {
+          Module['removeRunDependency']('fp ' + that.name);
+        }, function() {
+          if (that.audio) {
+            Module['removeRunDependency']('fp ' + that.name); // workaround for chromium bug 124926 (still no audio with this, but at least we don't hang)
+          } else {
+            Module.printErr('Preloading file ' + that.name + ' failed');
+          }
+        }, false, true); // canOwn this data in the filesystem, it is a slide into the heap that will never change
+        this.requests[this.name] = null;
+      },
+    };
+
+      new DataRequest(0, 20204, 0, 0).open('GET', 'airplanegame.ax');
+      new DataRequest(20204, 67413, 0, 0).open('GET', 'res/AirPlane_3.png');
+      new DataRequest(67413, 67814, 0, 0).open('GET', 'res/back.png');
+      new DataRequest(67814, 72266, 0, 0).open('GET', 'res/balloon++.png');
+      new DataRequest(72266, 114480, 0, 0).open('GET', 'res/balloon+.gpb');
+      new DataRequest(114480, 116594, 0, 0).open('GET', 'res/balloon+.material');
+      new DataRequest(116594, 118606, 0, 0).open('GET', 'res/balloon_.png');
+      new DataRequest(118606, 418244, 0, 0).open('GET', 'res/btn07.wav');
+      new DataRequest(418244, 422363, 0, 0).open('GET', 'res/efx_2.png');
+      new DataRequest(422363, 467815, 0, 0).open('GET', 'res/field1.png');
+      new DataRequest(467815, 505857, 0, 0).open('GET', 'res/field2.png');
+      new DataRequest(505857, 679177, 0, 0).open('GET', 'res/land_2.png');
+      new DataRequest(679177, 680327, 0, 0).open('GET', 'res/out.wav');
+      new DataRequest(680327, 747362, 0, 0).open('GET', 'res/plane_.png');
+      new DataRequest(747362, 810339, 0, 0).open('GET', 'res/RacePlane1.gpb');
+      new DataRequest(810339, 813626, 0, 0).open('GET', 'res/RacePlane1.material');
+      new DataRequest(813626, 876819, 0, 0).open('GET', 'res/RacePlane2.gpb');
+      new DataRequest(876819, 880126, 0, 0).open('GET', 'res/RacePlane2.material');
+      new DataRequest(880126, 986658, 0, 0).open('GET', 'res/RacePlane3.gpb');
+      new DataRequest(986658, 989960, 0, 0).open('GET', 'res/RacePlane3.material');
+      new DataRequest(989960, 1102132, 0, 0).open('GET', 'res/se02.wav');
+      new DataRequest(1102132, 1306464, 0, 0).open('GET', 'res/se10.wav');
+      new DataRequest(1306464, 1757959, 0, 0).open('GET', 'res/sea_0.png');
+      new DataRequest(1757959, 1777579, 0, 0).open('GET', 'res/sea_ball.gpb');
+      new DataRequest(1777579, 1779284, 0, 0).open('GET', 'res/sea_ball.material');
+      new DataRequest(1779284, 1793810, 0, 0).open('GET', 'res/se_break3.wav');
+      new DataRequest(1793810, 1798462, 0, 0).open('GET', 'res/se_foot.wav');
+      new DataRequest(1798462, 1803710, 0, 0).open('GET', 'res/shadow.png');
+      new DataRequest(1803710, 1833450, 0, 0).open('GET', 'res/sideout.wav');
+      new DataRequest(1833450, 3003489, 0, 0).open('GET', 'res/sky0.png');
+      new DataRequest(3003489, 3011621, 0, 0).open('GET', 'res/switch.wav');
+      new DataRequest(3011621, 3389735, 0, 0).open('GET', 'res/tamflash1.mp3');
+      new DataRequest(3389735, 3641994, 0, 0).open('GET', 'res/terrain.gpb');
+      new DataRequest(3641994, 3643393, 0, 0).open('GET', 'res/terrain.material');
+      new DataRequest(3643393, 3661315, 0, 0).open('GET', 'res/vpad.png');
+      new DataRequest(3661315, 3735482, 0, 0).open('GET', 'res/vpadstick_1.png');
+      new DataRequest(3735482, 3933811, 0, 0).open('GET', 'res/vpadstick_2.png');
+      new DataRequest(3933811, 3999795, 0, 0).open('GET', 'res/vpad_2.png');
+      new DataRequest(3999795, 4059072, 0, 0).open('GET', 'res/water.png');
+      new DataRequest(4059072, 4160629, 0, 0).open('GET', 'res/wood 1.png');
+      new DataRequest(4160629, 4163652, 0, 0).open('GET', 'res/shaders/colored.frag');
+      new DataRequest(4163652, 4166812, 0, 0).open('GET', 'res/shaders/colored.vert');
+      new DataRequest(4166812, 4167732, 0, 0).open('GET', 'res/shaders/font.frag');
+      new DataRequest(4167732, 4168241, 0, 0).open('GET', 'res/shaders/font.vert');
+      new DataRequest(4168241, 4171532, 0, 0).open('GET', 'res/shaders/lighting.frag');
+      new DataRequest(4171532, 4173828, 0, 0).open('GET', 'res/shaders/lighting.vert');
+      new DataRequest(4173828, 4176494, 0, 0).open('GET', 'res/shaders/minimap.frag');
+      new DataRequest(4176494, 4177541, 0, 0).open('GET', 'res/shaders/or_chromaticAb.frag');
+      new DataRequest(4177541, 4179068, 0, 0).open('GET', 'res/shaders/or_common.inc');
+      new DataRequest(4179068, 4182086, 0, 0).open('GET', 'res/shaders/or_fxantialias.frag');
+      new DataRequest(4182086, 4185535, 0, 0).open('GET', 'res/shaders/or_lighting.frag');
+      new DataRequest(4185535, 4188198, 0, 0).open('GET', 'res/shaders/or_lighting.vert');
+      new DataRequest(4188198, 4192523, 0, 0).open('GET', 'res/shaders/or_litShader.frag');
+      new DataRequest(4192523, 4193168, 0, 0).open('GET', 'res/shaders/or_litShader.vert');
+      new DataRequest(4193168, 4198237, 0, 0).open('GET', 'res/shaders/or_std.frag');
+      new DataRequest(4198237, 4204680, 0, 0).open('GET', 'res/shaders/or_std.vert');
+      new DataRequest(4204680, 4209598, 0, 0).open('GET', 'res/shaders/or_toon.frag');
+      new DataRequest(4209598, 4214354, 0, 0).open('GET', 'res/shaders/or_toon.vert');
+      new DataRequest(4214354, 4218571, 0, 0).open('GET', 'res/shaders/or_water.frag');
+      new DataRequest(4218571, 4222861, 0, 0).open('GET', 'res/shaders/or_water.vert');
+      new DataRequest(4222861, 4247387, 0, 0).open('GET', 'res/shaders/pbr.frag');
+      new DataRequest(4247387, 4247969, 0, 0).open('GET', 'res/shaders/pbr.vert');
+      new DataRequest(4247969, 4248695, 0, 0).open('GET', 'res/shaders/p_bloom.frag');
+      new DataRequest(4248695, 4250041, 0, 0).open('GET', 'res/shaders/p_blur.frag');
+      new DataRequest(4250041, 4250859, 0, 0).open('GET', 'res/shaders/p_blur2.frag');
+      new DataRequest(4250859, 4251785, 0, 0).open('GET', 'res/shaders/p_blur2.vert');
+      new DataRequest(4251785, 4252398, 0, 0).open('GET', 'res/shaders/p_contrast.frag');
+      new DataRequest(4252398, 4253403, 0, 0).open('GET', 'res/shaders/p_crtmonitor.frag');
+      new DataRequest(4253403, 4254747, 0, 0).open('GET', 'res/shaders/p_crtmonitor2.frag');
+      new DataRequest(4254747, 4255327, 0, 0).open('GET', 'res/shaders/p_grayscale.frag');
+      new DataRequest(4255327, 4255986, 0, 0).open('GET', 'res/shaders/p_mosaic.frag');
+      new DataRequest(4255986, 4260785, 0, 0).open('GET', 'res/shaders/p_oldfilm.frag');
+      new DataRequest(4260785, 4261518, 0, 0).open('GET', 'res/shaders/p_sepia.frag');
+      new DataRequest(4261518, 4262984, 0, 0).open('GET', 'res/shaders/p_sobel.frag');
+      new DataRequest(4262984, 4264201, 0, 0).open('GET', 'res/shaders/simpletex.frag');
+      new DataRequest(4264201, 4265234, 0, 0).open('GET', 'res/shaders/simpletex.vert');
+      new DataRequest(4265234, 4265476, 0, 0).open('GET', 'res/shaders/skinning-none.vert');
+      new DataRequest(4265476, 4267847, 0, 0).open('GET', 'res/shaders/skinning.vert');
+      new DataRequest(4267847, 4269116, 0, 0).open('GET', 'res/shaders/skybox.frag');
+      new DataRequest(4269116, 4270342, 0, 0).open('GET', 'res/shaders/skybox.vert');
+      new DataRequest(4270342, 4270842, 0, 0).open('GET', 'res/shaders/sprite.frag');
+      new DataRequest(4270842, 4271350, 0, 0).open('GET', 'res/shaders/sprite.vert');
+      new DataRequest(4271350, 4271521, 0, 0).open('GET', 'res/shaders/spritecol.frag');
+      new DataRequest(4271521, 4271768, 0, 0).open('GET', 'res/shaders/spritecol.vert');
+      new DataRequest(4271768, 4272998, 0, 0).open('GET', 'res/shaders/statbar.frag');
+      new DataRequest(4272998, 4276856, 0, 0).open('GET', 'res/shaders/terrain.frag');
+      new DataRequest(4276856, 4279452, 0, 0).open('GET', 'res/shaders/terrain.vert');
+      new DataRequest(4279452, 4282875, 0, 0).open('GET', 'res/shaders/textured.frag');
+      new DataRequest(4282875, 4287041, 0, 0).open('GET', 'res/shaders/textured.vert');
+      new DataRequest(4287041, 4290451, 0, 0).open('GET', 'res/shaders/textured_gray.frag');
+      new DataRequest(4290451, 4292766, 0, 0).open('GET', 'res/shaders/youdai_p_pergb.frag');
+
+
+    function processPackageData(arrayBuffer) {
+      Module.finishedDataFileDownloads++;
+      assert(arrayBuffer, 'Loading data file failed.');
+      var byteArray = new Uint8Array(arrayBuffer);
+      var curr;
+      
+      // copy the entire loaded file into a spot in the heap. Files will refer to slices in that. They cannot be freed though.
+      var ptr = Module['_malloc'](byteArray.length);
+      Module['HEAPU8'].set(byteArray, ptr);
+      DataRequest.prototype.byteArray = Module['HEAPU8'].subarray(ptr, ptr+byteArray.length);
+
+          DataRequest.prototype.requests["airplanegame.ax"].onload();
+          DataRequest.prototype.requests["res/AirPlane_3.png"].onload();
+          DataRequest.prototype.requests["res/back.png"].onload();
+          DataRequest.prototype.requests["res/balloon++.png"].onload();
+          DataRequest.prototype.requests["res/balloon+.gpb"].onload();
+          DataRequest.prototype.requests["res/balloon+.material"].onload();
+          DataRequest.prototype.requests["res/balloon_.png"].onload();
+          DataRequest.prototype.requests["res/btn07.wav"].onload();
+          DataRequest.prototype.requests["res/efx_2.png"].onload();
+          DataRequest.prototype.requests["res/field1.png"].onload();
+          DataRequest.prototype.requests["res/field2.png"].onload();
+          DataRequest.prototype.requests["res/land_2.png"].onload();
+          DataRequest.prototype.requests["res/out.wav"].onload();
+          DataRequest.prototype.requests["res/plane_.png"].onload();
+          DataRequest.prototype.requests["res/RacePlane1.gpb"].onload();
+          DataRequest.prototype.requests["res/RacePlane1.material"].onload();
+          DataRequest.prototype.requests["res/RacePlane2.gpb"].onload();
+          DataRequest.prototype.requests["res/RacePlane2.material"].onload();
+          DataRequest.prototype.requests["res/RacePlane3.gpb"].onload();
+          DataRequest.prototype.requests["res/RacePlane3.material"].onload();
+          DataRequest.prototype.requests["res/se02.wav"].onload();
+          DataRequest.prototype.requests["res/se10.wav"].onload();
+          DataRequest.prototype.requests["res/sea_0.png"].onload();
+          DataRequest.prototype.requests["res/sea_ball.gpb"].onload();
+          DataRequest.prototype.requests["res/sea_ball.material"].onload();
+          DataRequest.prototype.requests["res/se_break3.wav"].onload();
+          DataRequest.prototype.requests["res/se_foot.wav"].onload();
+          DataRequest.prototype.requests["res/shadow.png"].onload();
+          DataRequest.prototype.requests["res/sideout.wav"].onload();
+          DataRequest.prototype.requests["res/sky0.png"].onload();
+          DataRequest.prototype.requests["res/switch.wav"].onload();
+          DataRequest.prototype.requests["res/tamflash1.mp3"].onload();
+          DataRequest.prototype.requests["res/terrain.gpb"].onload();
+          DataRequest.prototype.requests["res/terrain.material"].onload();
+          DataRequest.prototype.requests["res/vpad.png"].onload();
+          DataRequest.prototype.requests["res/vpadstick_1.png"].onload();
+          DataRequest.prototype.requests["res/vpadstick_2.png"].onload();
+          DataRequest.prototype.requests["res/vpad_2.png"].onload();
+          DataRequest.prototype.requests["res/water.png"].onload();
+          DataRequest.prototype.requests["res/wood 1.png"].onload();
+          DataRequest.prototype.requests["res/shaders/colored.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/colored.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/font.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/font.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/lighting.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/lighting.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/minimap.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_chromaticAb.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_common.inc"].onload();
+          DataRequest.prototype.requests["res/shaders/or_fxantialias.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_lighting.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_lighting.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/or_litShader.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_litShader.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/or_std.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_std.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/or_toon.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_toon.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/or_water.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/or_water.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/pbr.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/pbr.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/p_bloom.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_blur.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_blur2.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_blur2.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/p_contrast.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_crtmonitor.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_crtmonitor2.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_grayscale.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_mosaic.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_oldfilm.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_sepia.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/p_sobel.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/simpletex.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/simpletex.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/skinning-none.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/skinning.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/skybox.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/skybox.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/sprite.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/sprite.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/spritecol.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/spritecol.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/statbar.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/terrain.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/terrain.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/textured.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/textured.vert"].onload();
+          DataRequest.prototype.requests["res/shaders/textured_gray.frag"].onload();
+          DataRequest.prototype.requests["res/shaders/youdai_p_pergb.frag"].onload();
+
+          Module['removeRunDependency']('datafile_airplanegame.data');
+
+    };
+    Module['addRunDependency']('datafile_airplanegame.data');
+  
+    if (!Module.preloadResults) Module.preloadResults = {};
+  
+      Module.preloadResults[PACKAGE_NAME] = {fromCache: false};
+      if (fetched) {
+        processPackageData(fetched);
+        fetched = null;
+      } else {
+        fetchedCallback = processPackageData;
+      }
+    
+        ENV.HSP_WX = "1000";//スクリプトの動作解像度
+        ENV.HSP_WY = "400";
+        ENV.HSP_SX = "1000";//表示解像度
+        ENV.HSP_SY = "400";
+        ENV.HSP_AUTOSCALE = "0";//スケーリングモード
+        ENV.HSP_FPS = "0";//フレームレート
+        ENV.HSP_LIMIT_STEP = "15000";//ブラウザに処理を返すまでの実行ステップ数
+        if (navigator.userAgent.match(/iPhone|Android.+Mobile/)) {  // ezlocal-dish-js
+        	ENV.HSP_SX = String(window.innerWidth);
+        	ENV.HSP_SY = String(window.innerHeight);
+        }
+        ENV.HSP_SENSOR = String( sensor_button );//センサーを使用する
+
+  }
+  if (Module['calledRun']) {
+    runWithFS();
+  } else {
+    if (!Module['preRun']) Module['preRun'] = [];
+    Module["preRun"].push(runWithFS); // FS is not initialized yet, wait for it
+  }
+
+})();
+
+
+				var fixAudioContext = function (e) {
+				        SDL.openAudioContext();
+					var context = SDL.audioContext;
+					if (context) {
+						// Create empty buffer
+						var buffer = context.createBuffer(1, 1, 22050);
+						var source = context.createBufferSource();
+						source.buffer = buffer;
+						// Connect to output (speakers)
+						source.connect(context.destination);
+						// Play sound
+						if (source.start) {
+							source.start(0);
+						} else if (source.play) {
+							source.play(0);
+						} else if (source.noteOn) {
+							source.noteOn(0);
+						}
+						//const soundEffect = new Audio();
+						//soundEffect.play();
+					      console.log('audio unlock:');
+					}
+
+					var target = document;
+					//var target = document.getElementById('canvas');
+
+					// Remove events
+					target.removeEventListener('touchstart', fixAudioContext);
+					target.removeEventListener('touchend', fixAudioContext);
+					target.removeEventListener('mousedown', fixAudioContext);
+				};
+				var addpermission = function (e) {
+				    if ( typeof( DeviceMotionEvent ) !== "undefined" && typeof( DeviceMotionEvent.requestPermission ) === "function" ) {
+				        // (optional) Do something before API request prompt.
+				        DeviceMotionEvent.requestPermission()
+			            .then( response => {
+			          	  // (optional) Do something after API prompt dismissed.
+				            if ( response == "granted" ) {
+				                    // do something for 'e' here.
+				            }
+				        })
+			            .catch( console.error )
+				    }
+				    //target.removeEventListener("click", addpermission);
+				}
+
+				//var target = document.getElementById('canvas');
+				var target = document;
+				// iOS 6-8
+				target.addEventListener('touchstart', fixAudioContext);
+				// iOS 9
+				target.addEventListener('touchend', fixAudioContext);
+				target.addEventListener('mousedown', fixAudioContext);
+
+				if ( sensor_button == 0 ) {
+					btn_flg.style.display = 'none';
+				} else {
+				    const btn_flg = document.getElementById('btn_flg'); //for iOS
+					if(window.DeviceMotionEvent){
+					 if(DeviceMotionEvent.requestPermission){
+					  btn_flg.addEventListener( "click", addpermission );
+					 }else{
+					  btn_flg.style.display = 'none';
+					 }
+					}
+				}
+
+    </script>
+    <script async src="hsp3dish-gp.js"></script>
+  <p style="font-size: small; color: rgb(64, 64, 64);">powered by <a href="https://hsp.tv/make/hsp3dish.html" target="_blank">hsp3dish-gp.js</a> / OpenHSP</p>
+  </body>
+</html>
